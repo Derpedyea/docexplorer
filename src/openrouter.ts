@@ -88,7 +88,7 @@ export async function inferPathPrefix(options: {
   });
 
   await response.consumeStream();
-  const raw = response.text.trim();
+  const raw = (await response.text).trim();
   if (!raw || raw === "__NO_PREFIX__") {
     return undefined;
   }
