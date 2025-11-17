@@ -7,6 +7,8 @@ import { htmlToMarkdown, inferPathPrefix } from "./openrouter";
 
 const DEFAULT_CONCURRENCY = 5;
 const MAX_CONCURRENCY = 16;
+const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+const MAX_PATH_SEGMENT_LENGTH = 64;
 const CACHE_VERSION = 1;
 const LOCAL_DOCS_ROOT = path.join(".mineperial", "docs");
 const DOCEXPLORER_HOME = path.join(os.homedir(), ".mineperial", "docsexplorer");
@@ -119,6 +121,11 @@ async function handleIndex(args: string[]): Promise<void> {
     baseUrl = new URL(urlArg);
   } catch {
     console.error("Invalid URL argument.");
+    process.exit(1);
+  }
+
+  if (!ALLOWED_PROTOCOLS.has(baseUrl.protocol)) {
+    console.error("Only http(s) URLs are supported.");
     process.exit(1);
   }
 
@@ -355,15 +362,41 @@ function urlPathToDirAndFile(
   }
 
   const segments = pathname.split("/");
+  const sanitizedSegments = segments
+    .map((segment) => sanitizePathSegment(segment))
+    .filter((segment): segment is string => Boolean(segment));
 
-  if (segments.length === 1) {
-    // Top-level page: make it a folder with index.md
-    return { dir: segments[0], file: "index.md" };
+  if (sanitizedSegments.length === 0) {
+    return { dir: "", file: "index.md" };
   }
 
-  const file = segments[segments.length - 1] + ".md";
-  const dir = segments.slice(0, -1).join("/");
+  if (sanitizedSegments.length === 1) {
+    // Top-level page: make it a folder with index.md
+    return { dir: sanitizedSegments[0], file: "index.md" };
+  }
+
+  const file = sanitizedSegments[sanitizedSegments.length - 1] + ".md";
+  const dir = sanitizedSegments.slice(0, -1).join("/");
   return { dir, file };
+}
+
+function sanitizePathSegment(segment: string): string | undefined {
+  const trimmed = segment.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const normalized = trimmed
+    .normalize("NFKC")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, MAX_PATH_SEGMENT_LENGTH);
+
+  if (!normalized || normalized === "." || normalized === "..") {
+    return crypto.createHash("sha1").update(trimmed).digest("hex").slice(0, 8);
+  }
+
+  return normalized;
 }
 
 type PrefixStats = { doc: number; nonDoc: number };
@@ -530,8 +563,11 @@ async function loadUserConfig(): Promise<UserConfig> {
 
 async function saveUserConfig(config: UserConfig): Promise<void> {
   const dir = path.dirname(CONFIG_PATH);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
 async function resolveApiKey(): Promise<string | undefined> {
@@ -550,7 +586,7 @@ async function resolveApiKey(): Promise<string | undefined> {
 }
 
 async function ensureCacheRoot(): Promise<string> {
-  await fs.mkdir(CACHE_ROOT, { recursive: true });
+  await fs.mkdir(CACHE_ROOT, { recursive: true, mode: 0o700 });
   return CACHE_ROOT;
 }
 
@@ -587,6 +623,10 @@ async function copyDir(src: string, dest: string, options?: { overwrite?: boolea
   for (const entry of entries) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    if (entry.isSymbolicLink()) {
+      console.warn(`Skipping symbolic link during copy: ${srcPath}`);
+      continue;
+    }
     if (entry.isDirectory()) {
       await copyDir(srcPath, destPath, options);
     } else if (entry.isFile()) {
