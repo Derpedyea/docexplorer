@@ -9,6 +9,10 @@ const DEFAULT_CONCURRENCY = 5;
 const MAX_CONCURRENCY = 16;
 const CACHE_VERSION = 1;
 const LOCAL_DOCS_ROOT = path.join(".mineperial", "docs");
+const DOCEXPLORER_HOME = path.join(os.homedir(), ".mineperial", "docsexplorer");
+const CACHE_ROOT = path.join(DOCEXPLORER_HOME, "cache");
+const CACHE_METADATA_FILENAME = "metadata.json";
+const CONFIG_PATH = path.join(DOCEXPLORER_HOME, "config.json");
 
 type CacheMetadata = {
   version: number;
@@ -20,6 +24,10 @@ type CacheMetadata = {
   createdAt: string;
   pagesIndexed: number;
   docsStored: number;
+};
+
+type UserConfig = {
+  openrouterApiKey?: string;
 };
 
 async function main() {
@@ -45,6 +53,11 @@ async function main() {
     return;
   }
 
+  if (commandOrName === "set-api-key") {
+    await handleSetApiKey(rest);
+    return;
+  }
+
   const legacyArgs = [commandOrName, ...rest];
   if (legacyArgs.length >= 2) {
     console.warn(
@@ -64,9 +77,10 @@ function printUsage(): void {
   bun run docexplorer index <name> <url> [pathPrefix] [--force]
   bun run docexplorer list
   bun run docexplorer pull <docId-or-name>
+  bun run docexplorer set-api-key <apiKey>
 
 Environment variables:
-  OPENROUTER_API_KEY (required)
+  OPENROUTER_API_KEY (overrides stored key)
   OPENROUTER_MODEL (default: openai/gpt-oss-safeguard-20b)
   DOCEXPLORER_CONCURRENCY (default: ${DEFAULT_CONCURRENCY}, max ${MAX_CONCURRENCY})
 `);
@@ -92,9 +106,11 @@ async function handleIndex(args: string[]): Promise<void> {
     }
   }
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = await resolveApiKey();
   if (!apiKey) {
-    console.error("Missing OPENROUTER_API_KEY environment variable.");
+    console.error(
+      "Missing OpenRouter API key. Set OPENROUTER_API_KEY or run `bun run docexplorer set-api-key <apiKey>`."
+    );
     process.exit(1);
   }
 
@@ -276,6 +292,25 @@ async function handlePull(args: string[]): Promise<void> {
   const destDir = path.join(process.cwd(), LOCAL_DOCS_ROOT, entry.docName);
   await copyDir(cacheDocsDir, destDir);
   console.log(`Copied cached docset '${entry.docName}' (id ${entry.docId}) into ${destDir}.`);
+}
+
+async function handleSetApiKey(args: string[]): Promise<void> {
+  const key = args[0];
+  if (!key) {
+    console.error("Usage: bun run docexplorer set-api-key <apiKey>");
+    process.exit(1);
+  }
+
+  const trimmed = key.trim();
+  if (!trimmed) {
+    console.error("API key cannot be empty.");
+    process.exit(1);
+  }
+
+  const config = await loadUserConfig();
+  config.openrouterApiKey = trimmed;
+  await saveUserConfig(config);
+  console.log("Saved OpenRouter API key to local config.");
 }
 
 function sanitizeName(name: string): string {
@@ -465,10 +500,40 @@ async function writeFileEnsuringDir(filePath: string, contents: string): Promise
   await fs.writeFile(filePath, contents, "utf8");
 }
 
-async function ensureCacheRoot(): Promise<string> {
-  const dir = path.join(os.homedir(), ".mineperial-cache");
+async function loadUserConfig(): Promise<UserConfig> {
+  try {
+    const raw = await fs.readFile(CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw) as UserConfig;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveUserConfig(config: UserConfig): Promise<void> {
+  const dir = path.dirname(CONFIG_PATH);
   await fs.mkdir(dir, { recursive: true });
-  return dir;
+  await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+}
+
+async function resolveApiKey(): Promise<string | undefined> {
+  const fromEnv = process.env.OPENROUTER_API_KEY;
+  if (fromEnv && fromEnv.trim()) {
+    return fromEnv.trim();
+  }
+
+  const config = await loadUserConfig();
+  const fromConfig = config.openrouterApiKey;
+  if (fromConfig && fromConfig.trim()) {
+    return fromConfig.trim();
+  }
+
+  return undefined;
+}
+
+async function ensureCacheRoot(): Promise<string> {
+  await fs.mkdir(CACHE_ROOT, { recursive: true });
+  return CACHE_ROOT;
 }
 
 function computeDocId(docName: string, url: string, pathPrefix?: string): string {
