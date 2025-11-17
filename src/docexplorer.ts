@@ -191,7 +191,7 @@ async function handleIndex(args: string[]): Promise<void> {
 
         const trimmed = markdown.trim();
 
-        if (!directMarkdown && trimmed === "__SKIP_NON_DOC__") {
+        if (isSkipMarker(trimmed)) {
           updatePrefixStats(prefixStats, pageUrlObj, false);
           console.log(`Skipping non-doc page: ${page.url}`);
           return;
@@ -498,6 +498,24 @@ async function writeFileEnsuringDir(filePath: string, contents: string): Promise
   const dir = path.dirname(filePath);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(filePath, contents, "utf8");
+}
+
+function isSkipMarker(markdown: string): boolean {
+  if (!markdown) {
+    return false;
+  }
+
+  const trimmed = markdown.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed === "__SKIP_NON_DOC__") {
+    return true;
+  }
+
+  const unwrapped = trimmed.replace(/^[`*]+/, "").replace(/[`*]+$/, "");
+  return unwrapped === "__SKIP_NON_DOC__" || unwrapped === "SKIP_NON_DOC";
 }
 
 async function loadUserConfig(): Promise<UserConfig> {
