@@ -1,0 +1,23 @@
+{
+  "name": "docexplorer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docexplorer": "bun src/docexplorer.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "bin": {
+    "docexplorer": "dist/docexplorer.js"
+  },
+  "dependencies": {
+    "ai": "*",
+    "@openrouter/ai-sdk-provider": "*",
+    "zod": "*",
+    "cheerio": "*"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "@types/node": "*"
+  }
+}
