@@ -23,9 +23,6 @@ coverage/
 .env.*
 !.env.example
 
-# Local cache/output
-.mineperial/
-
 # OS files
 .DS_Store
 Thumbs.db
