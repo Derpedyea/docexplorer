@@ -117,8 +117,24 @@ async function handleIndex(args: string[]): Promise<void> {
   let baseUrl: URL;
   try {
     baseUrl = new URL(urlArg);
+    // Security: Only allow http and https protocols
+    if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+      console.error("Invalid URL protocol. Only HTTP and HTTPS are allowed.");
+      process.exit(1);
+    }
   } catch {
     console.error("Invalid URL argument.");
+    process.exit(1);
+  }
+
+  // Security: Validate and sanitize the name argument
+  if (!nameArg || nameArg.trim().length === 0) {
+    console.error("Invalid name argument. Name cannot be empty.");
+    process.exit(1);
+  }
+  
+  if (nameArg.length > 100) {
+    console.error("Invalid name argument. Name must be 100 characters or less.");
     process.exit(1);
   }
 
@@ -139,6 +155,14 @@ async function handleIndex(args: string[]): Promise<void> {
   }
 
   let pathPrefix = pathArg && pathArg.trim() ? pathArg.trim() : undefined;
+  
+  // Security: Validate pathPrefix format if provided
+  if (pathPrefix) {
+    if (pathPrefix.includes("..") || pathPrefix.includes("\\")) {
+      console.error("Invalid path prefix. Path traversal patterns are not allowed.");
+      process.exit(1);
+    }
+  }
 
   if (!pathPrefix) {
     console.log("No path prefix provided; asking model to infer docs path prefix...");
@@ -326,10 +350,21 @@ function buildFilePath(
   pageUrl: URL
 ): string {
   const { dir, file } = urlPathToDirAndFile(baseUrl, pageUrl);
-  if (dir) {
-    return path.join(rootDir, ".mineperial", "docs", docName, dir, file);
+  
+  // Security: Validate that the resulting path doesn't escape the docs directory
+  const docsRoot = path.join(rootDir, ".mineperial", "docs", docName);
+  const fullPath = dir 
+    ? path.join(docsRoot, dir, file)
+    : path.join(docsRoot, file);
+  
+  const normalizedPath = path.normalize(fullPath);
+  const normalizedRoot = path.normalize(docsRoot);
+  
+  if (!normalizedPath.startsWith(normalizedRoot)) {
+    throw new Error(`Security: Path traversal attempt detected: ${pageUrl.pathname}`);
   }
-  return path.join(rootDir, ".mineperial", "docs", docName, file);
+  
+  return fullPath;
 }
 
 function urlPathToDirAndFile(
@@ -355,15 +390,40 @@ function urlPathToDirAndFile(
   }
 
   const segments = pathname.split("/");
-
-  if (segments.length === 1) {
-    // Top-level page: make it a folder with index.md
-    return { dir: segments[0], file: "index.md" };
+  
+  // Security: Sanitize each path segment to prevent path traversal
+  const sanitizedSegments = segments.map(sanitizePathSegment).filter(Boolean);
+  
+  if (sanitizedSegments.length === 0) {
+    return { dir: "", file: "index.md" };
   }
 
-  const file = segments[segments.length - 1] + ".md";
-  const dir = segments.slice(0, -1).join("/");
+  if (sanitizedSegments.length === 1) {
+    // Top-level page: make it a folder with index.md
+    return { dir: sanitizedSegments[0], file: "index.md" };
+  }
+
+  const file = sanitizedSegments[sanitizedSegments.length - 1] + ".md";
+  const dir = sanitizedSegments.slice(0, -1).join("/");
   return { dir, file };
+}
+
+function sanitizePathSegment(segment: string): string {
+  // Remove any path traversal attempts and dangerous characters
+  const cleaned = segment
+    .replace(/\.\./g, "") // Remove ..
+    .replace(/^\.+/, "") // Remove leading dots
+    .replace(/[<>:"|?*\x00-\x1f]/g, "") // Remove invalid filename characters
+    .trim();
+  
+  // Prevent empty segments and reserved names
+  if (!cleaned || cleaned === "." || cleaned === "CON" || cleaned === "PRN" || 
+      cleaned === "AUX" || cleaned === "NUL" || /^COM\d$/.test(cleaned) || 
+      /^LPT\d$/.test(cleaned)) {
+    return "";
+  }
+  
+  return cleaned;
 }
 
 type PrefixStats = { doc: number; nonDoc: number };
@@ -425,13 +485,15 @@ function suggestPathPrefixFromStats(
 function getConcurrencyFromEnv(): number {
   const raw = process.env.DOCEXPLORER_CONCURRENCY;
   if (!raw) {
-    return 5;
+    return DEFAULT_CONCURRENCY;
   }
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return 5;
+  // Security: Validate parsed value to prevent resource exhaustion
+  if (!Number.isFinite(parsed) || parsed <= 0 || Number.isNaN(parsed)) {
+    console.warn(`Invalid DOCEXPLORER_CONCURRENCY value: ${raw}. Using default: ${DEFAULT_CONCURRENCY}`);
+    return DEFAULT_CONCURRENCY;
   }
-  return Math.min(parsed, 16);
+  return Math.min(Math.max(1, parsed), MAX_CONCURRENCY);
 }
 
 async function processPagesConcurrently<T>(
@@ -464,17 +526,42 @@ async function fetchMarkdownIfAvailable(pageUrl: string): Promise<string | null>
   let mdUrl: string;
   try {
     mdUrl = buildMarkdownUrl(pageUrl);
+    // Security: Validate URL
+    const url = new URL(mdUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
   } catch {
     return null;
   }
 
   try {
-    const response = await fetch(mdUrl);
+    // Security: Add timeout for fetch operation
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+    
+    const response = await fetch(mdUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    
     if (!response.ok) {
+      return null;
+    }
+    
+    // Security: Check content size
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > 5 * 1024 * 1024) { // 5 MB limit
+      console.warn(`Markdown file too large: ${mdUrl}`);
       return null;
     }
 
     const text = await response.text();
+    
+    // Security: Additional size check
+    if (text.length > 5 * 1024 * 1024) { // 5 MB limit
+      console.warn(`Markdown content too large: ${mdUrl}`);
+      return null;
+    }
+    
     if (!text.trim()) {
       return null;
     }
@@ -521,9 +608,24 @@ function isSkipMarker(markdown: string): boolean {
 async function loadUserConfig(): Promise<UserConfig> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf8");
+    
+    // Security: Limit config file size to prevent resource exhaustion
+    if (raw.length > 1024 * 1024) { // 1 MB limit
+      console.warn("Config file too large, using defaults");
+      return {};
+    }
+    
     const parsed = JSON.parse(raw) as UserConfig;
-    return parsed ?? {};
-  } catch {
+    
+    // Validate the structure
+    if (typeof parsed !== "object" || parsed === null) {
+      console.warn("Invalid config file format, using defaults");
+      return {};
+    }
+    
+    return parsed;
+  } catch (err) {
+    // Return empty config if file doesn't exist or is invalid
     return {};
   }
 }
@@ -579,18 +681,43 @@ async function copyDir(src: string, dest: string, options?: { overwrite?: boolea
   if (!(await pathExists(src))) {
     throw new Error(`Source directory does not exist: ${src}`);
   }
-  if (options?.overwrite) {
-    await fs.rm(dest, { recursive: true, force: true });
+  
+  // Security: Validate that dest doesn't escape expected boundaries
+  const normalizedDest = path.normalize(dest);
+  if (normalizedDest.includes("..")) {
+    throw new Error(`Security: Invalid destination path: ${dest}`);
   }
+  
+  if (options?.overwrite) {
+    try {
+      await fs.rm(dest, { recursive: true, force: true });
+    } catch (err) {
+      // Ignore errors if destination doesn't exist
+    }
+  }
+  
   await fs.mkdir(dest, { recursive: true });
-  const entries = await fs.readdir(src, { withFileTypes: true });
+  
+  let entries;
+  try {
+    entries = await fs.readdir(src, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(`Failed to read source directory: ${src}`);
+  }
+  
   for (const entry of entries) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      await copyDir(srcPath, destPath, options);
-    } else if (entry.isFile()) {
-      await fs.copyFile(srcPath, destPath);
+    
+    try {
+      if (entry.isDirectory()) {
+        await copyDir(srcPath, destPath, options);
+      } else if (entry.isFile()) {
+        await fs.copyFile(srcPath, destPath);
+      }
+      // Skip symlinks and other special files for security
+    } catch (err) {
+      console.warn(`Warning: Failed to copy ${srcPath}: ${err}`);
     }
   }
 }
@@ -617,7 +744,15 @@ async function saveDocsetToCache(
 async function readAllCacheEntries(): Promise<CacheMetadata[]> {
   const root = await ensureCacheRoot();
   const entries: CacheMetadata[] = [];
-  const dirEntries = await fs.readdir(root, { withFileTypes: true });
+  
+  let dirEntries;
+  try {
+    dirEntries = await fs.readdir(root, { withFileTypes: true });
+  } catch (err) {
+    console.warn(`Failed to read cache directory: ${err}`);
+    return [];
+  }
+  
   for (const entry of dirEntries) {
     if (!entry.isDirectory()) {
       continue;
@@ -628,7 +763,21 @@ async function readAllCacheEntries(): Promise<CacheMetadata[]> {
     }
     try {
       const raw = await fs.readFile(metadataPath, "utf8");
+      
+      // Security: Limit metadata file size
+      if (raw.length > 1024 * 1024) { // 1 MB limit
+        console.warn(`Skipping cache entry ${entry.name}: metadata file too large`);
+        continue;
+      }
+      
       const parsed = JSON.parse(raw) as CacheMetadata;
+      
+      // Validate required fields
+      if (!parsed.docId || !parsed.docName || !parsed.sourceUrl) {
+        console.warn(`Skipping cache entry ${entry.name}: invalid metadata structure`);
+        continue;
+      }
+      
       entries.push(parsed);
     } catch (err) {
       console.warn(`Skipping cache entry ${entry.name}: ${err}`);

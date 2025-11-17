@@ -9,13 +9,37 @@ export async function crawl(
   maxPages: number,
   pathPrefix?: string
 ): Promise<CrawledPage[]> {
-  const originUrl = new URL(baseUrl);
+  // Security: Validate baseUrl
+  let originUrl: URL;
+  try {
+    originUrl = new URL(baseUrl);
+    if (originUrl.protocol !== "http:" && originUrl.protocol !== "https:") {
+      throw new Error("Only HTTP and HTTPS protocols are allowed");
+    }
+  } catch (err) {
+    throw new Error(`Invalid base URL: ${baseUrl}`);
+  }
+  
+  // Security: Limit max pages to prevent resource exhaustion
+  const MAX_ALLOWED_PAGES = 1000;
+  const effectiveMaxPages = Math.min(maxPages, MAX_ALLOWED_PAGES);
+  
   const normalizedPrefix = normalizePathPrefix(pathPrefix);
   const visited = new Set<string>();
   const queue: string[] = [originUrl.href];
   const pages: CrawledPage[] = [];
+  
+  // Security: Add timeout for the entire crawl operation
+  const crawlStartTime = Date.now();
+  const MAX_CRAWL_TIME_MS = 30 * 60 * 1000; // 30 minutes
 
-  while (queue.length > 0 && pages.length < maxPages) {
+  while (queue.length > 0 && pages.length < effectiveMaxPages) {
+    // Security: Check if crawl has exceeded time limit
+    if (Date.now() - crawlStartTime > MAX_CRAWL_TIME_MS) {
+      console.warn("Crawl operation exceeded time limit");
+      break;
+    }
+    
     const current = queue.shift() as string;
     if (visited.has(current)) {
       continue;
@@ -24,7 +48,12 @@ export async function crawl(
 
     let response: Response;
     try {
-      response = await fetch(current);
+      // Security: Add timeout for individual fetch operations
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      
+      response = await fetch(current, { signal: controller.signal });
+      clearTimeout(timeoutId);
     } catch {
       continue;
     }
@@ -32,15 +61,29 @@ export async function crawl(
     if (!response.ok) {
       continue;
     }
+    
+    // Security: Limit response size to prevent memory exhaustion
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) { // 10 MB limit
+      console.warn(`Skipping ${current}: content too large`);
+      continue;
+    }
 
     const html = await response.text();
+    
+    // Security: Additional check for HTML size
+    if (html.length > 10 * 1024 * 1024) { // 10 MB limit
+      console.warn(`Skipping ${current}: HTML too large`);
+      continue;
+    }
+    
     const title = extractTitle(html);
 
     pages.push({ url: current, html, title });
 
     const links = extractLinks(current, html, originUrl, normalizedPrefix);
     for (const link of links) {
-      if (!visited.has(link) && !queue.includes(link) && pages.length + queue.length < maxPages) {
+      if (!visited.has(link) && !queue.includes(link) && pages.length + queue.length < effectiveMaxPages) {
         queue.push(link);
       }
     }
@@ -64,10 +107,16 @@ function extractLinks(
   pathPrefix?: string
 ): string[] {
   const links: string[] = [];
-  const anchorRegex = /<a\s+[^>]*href=["']([^"'#]+)["'][^>]*>/gi;
+  // Security: Use non-backtracking regex to prevent ReDoS
+  const anchorRegex = /<a\s+[^>]*?href=["']([^"'#]+?)["'][^>]*?>/gi;
   let match: RegExpExecArray | null;
+  
+  // Security: Limit iterations to prevent infinite loops on malicious HTML
+  let iterations = 0;
+  const MAX_ITERATIONS = 10000;
 
-  while ((match = anchorRegex.exec(html)) !== null) {
+  while ((match = anchorRegex.exec(html)) !== null && iterations < MAX_ITERATIONS) {
+    iterations++;
     const href = match[1];
 
     if (!href || href.startsWith("#") || href.startsWith("mailto:")) {

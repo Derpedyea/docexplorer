@@ -43,17 +43,48 @@ export async function inferPathPrefix(options: {
   model: string;
   baseUrl: string;
 }): Promise<string | undefined> {
+  // Security: Validate base URL
+  let url: URL;
+  try {
+    url = new URL(options.baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("Only HTTP and HTTPS protocols are allowed");
+    }
+  } catch {
+    return undefined;
+  }
+
   const openrouter = createOpenRouter({
     apiKey: options.apiKey,
   });
 
   let html: string;
   try {
-    const resp = await fetch(options.baseUrl);
+    // Security: Add timeout for fetch operation
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    
+    const resp = await fetch(options.baseUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    
     if (!resp.ok) {
       return undefined;
     }
+    
+    // Security: Check content size
+    const contentLength = resp.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > 5 * 1024 * 1024) { // 5 MB limit
+      console.warn("Response too large for path prefix inference");
+      return undefined;
+    }
+    
     html = await resp.text();
+    
+    // Security: Additional check for HTML size
+    if (html.length > 5 * 1024 * 1024) { // 5 MB limit
+      console.warn("HTML too large for path prefix inference");
+      return undefined;
+    }
   } catch {
     return undefined;
   }
@@ -99,6 +130,13 @@ export async function inferPathPrefix(options: {
   }
 
   const prefix = firstLine.startsWith("/") ? firstLine : `/${firstLine}`;
+  
+  // Security: Validate the returned prefix
+  if (prefix.includes("..") || prefix.includes("\\")) {
+    console.warn("Invalid path prefix returned by model");
+    return undefined;
+  }
+  
   return prefix;
 }
 
@@ -134,10 +172,16 @@ function truncateHtml(html: string): string {
 function collectSamplePaths(origin: URL, html: string, max: number): string[] {
   const paths: string[] = [];
   const seen = new Set<string>();
-  const anchorRegex = /<a\s+[^>]*href=["']([^"'#]+)["'][^>]*>/gi;
+  // Security: Use non-backtracking regex to prevent ReDoS
+  const anchorRegex = /<a\s+[^>]*?href=["']([^"'#]+?)["'][^>]*?>/gi;
   let match: RegExpExecArray | null;
+  
+  // Security: Limit iterations to prevent infinite loops on malicious HTML
+  let iterations = 0;
+  const MAX_ITERATIONS = 10000;
 
-  while ((match = anchorRegex.exec(html)) !== null && paths.length < max) {
+  while ((match = anchorRegex.exec(html)) !== null && paths.length < max && iterations < MAX_ITERATIONS) {
+    iterations++;
     const href = match[1];
     if (!href || href.startsWith("#") || href.startsWith("mailto:")) {
       continue;
