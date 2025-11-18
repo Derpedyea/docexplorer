@@ -3,19 +3,34 @@
 CLI tool for crawling external documentation sites, converting pages to Markdown via OpenRouter, and materializing the docs into each of your local projects. It supports a system-wide local cache and can sync with a remote backend to share docsets across your team.
 
 ## Installation
+[https://www.npmjs.com/package/@derped/docexplorer](https://www.npmjs.com/package/@derped/docexplorer)
 
 ### Prerequisites
 
 - Node.js / Bun installed
 - An OpenRouter API key
 
-### Install dependencies
+### Install from npm (Recommended)
+
+Install globally using npm:
+
+```bash
+npm install -g @derped/docexplorer
+```
+
+This makes a global `docexplorer` command available on your PATH. You can then run `docexplorer ...` from any project directory.
+
+### Development Installation
+
+If you want to build from source or contribute:
+
+#### Install dependencies
 
 ```bash
 bun install
 ```
 
-### Build the CLI
+#### Build the CLI
 
 ```bash
 bun run build
@@ -23,7 +38,7 @@ bun run build
 
 This compiles TypeScript into `dist/docexplorer.js`, which is what the CLI entry point uses.
 
-### Optional: Install globally
+#### Optional: Install globally (development)
 
 From the project root:
 

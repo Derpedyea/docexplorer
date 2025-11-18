@@ -1,6 +1,6 @@
 {
   "name": "@derped/docexplorer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI tool for crawling external documentation sites, converting pages to Markdown via OpenRouter, and materializing the docs into each of your local projects",
   "type": "module",
   "main": "dist/docexplorer.js",
