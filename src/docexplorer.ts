@@ -7,6 +7,8 @@ import { htmlToMarkdown, inferPathPrefix } from "./openrouter";
 
 const DEFAULT_CONCURRENCY = 5;
 const MAX_CONCURRENCY = 16;
+const DEFAULT_MAX_PAGES = 50;
+const MAX_MAX_PAGES = 2000;
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const MAX_PATH_SEGMENT_LENGTH = 64;
 const CACHE_VERSION = 1;
@@ -169,7 +171,7 @@ async function handleIndex(args: string[]): Promise<void> {
   console.log(`Crawling documentation from ${baseUrl.href}`);
 
   const prefixStats: PrefixStatsMap = {};
-  const pages = await crawl(baseUrl.href, 50, pathPrefix);
+  const pages = await crawl(baseUrl.href, getMaxPagesFromEnv(), pathPrefix);
   if (pages.length === 0) {
     console.log("No pages discovered to process.");
     return;
@@ -186,7 +188,7 @@ async function handleIndex(args: string[]): Promise<void> {
       console.log(`Processing ${page.url}`);
       try {
         const directMarkdown = await fetchMarkdownIfAvailable(page.url);
-        const markdown =
+        let markdown =
           directMarkdown ??
           (await htmlToMarkdown({
             apiKey,
@@ -196,12 +198,35 @@ async function handleIndex(args: string[]): Promise<void> {
             html: page.html,
           }));
 
-        const trimmed = markdown.trim();
+        let trimmed = markdown.trim();
 
         if (isSkipMarker(trimmed)) {
-          updatePrefixStats(prefixStats, pageUrlObj, false);
-          console.log(`Skipping non-doc page: ${page.url}`);
-          return;
+          const shouldForceDoc =
+            !directMarkdown && isLikelyDocPage(page.url, page.title, page.html);
+
+          if (shouldForceDoc) {
+            console.log(
+              `LLM classified as non-doc but heuristics consider this a doc page; reprocessing as doc: ${page.url}`
+            );
+            markdown = await htmlToMarkdown({
+              apiKey,
+              model,
+              url: page.url,
+              title: page.title,
+              html: page.html,
+              forceTreatAsDoc: true,
+            });
+            trimmed = markdown.trim();
+            if (isSkipMarker(trimmed)) {
+              updatePrefixStats(prefixStats, pageUrlObj, false);
+              console.log(`Skipping non-doc page after forced-doc retry: ${page.url}`);
+              return;
+            }
+          } else {
+            updatePrefixStats(prefixStats, pageUrlObj, false);
+            console.log(`Skipping non-doc page: ${page.url}`);
+            return;
+          }
         }
 
         updatePrefixStats(prefixStats, pageUrlObj, true);
@@ -467,6 +492,18 @@ function getConcurrencyFromEnv(): number {
   return Math.min(parsed, 16);
 }
 
+function getMaxPagesFromEnv(): number {
+  const raw = process.env.DOCEXPLORER_MAX_PAGES;
+  if (!raw) {
+    return DEFAULT_MAX_PAGES;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_MAX_PAGES;
+  }
+  return Math.min(parsed, MAX_MAX_PAGES);
+}
+
 async function processPagesConcurrently<T>(
   items: T[],
   concurrency: number,
@@ -549,6 +586,65 @@ function isSkipMarker(markdown: string): boolean {
 
   const unwrapped = trimmed.replace(/^[`*]+/, "").replace(/[`*]+$/, "");
   return unwrapped === "__SKIP_NON_DOC__" || unwrapped === "SKIP_NON_DOC";
+}
+
+function isLikelyDocPage(
+  url: string,
+  title: string | undefined,
+  html: string
+): boolean {
+  const urlLower = url.toLowerCase();
+  const titleLower = (title ?? "").toLowerCase();
+
+  const docPathHints = [
+    "/docs/",
+    "/doc/",
+    "/documentation",
+    "/guide",
+    "/guides/",
+    "/manual",
+    "/tutorial",
+    "/tutorials",
+    "/api/",
+    "/reference",
+    "/classes/",
+    "/class_",
+  ];
+
+  if (docPathHints.some((hint) => urlLower.includes(hint))) {
+    return true;
+  }
+
+  const docTitleKeywords = [
+    "docs",
+    "documentation",
+    "manual",
+    "guide",
+    "tutorial",
+    "reference",
+    "api",
+    "class reference",
+    "godot",
+  ];
+
+  if (docTitleKeywords.some((kw) => titleLower.includes(kw))) {
+    return true;
+  }
+
+  const codeMatchCount = (html.match(/<pre|<code/gi) ?? []).length;
+  const headingCount = (html.match(/<h[1-6][^>]*>/gi) ?? []).length;
+  const hasTechnicalTerms =
+    /parameter|parameters|returns|class\s+[A-Z][A-Za-z0-9_]+/.test(html);
+
+  if (codeMatchCount >= 2 && headingCount >= 2) {
+    return true;
+  }
+
+  if ((codeMatchCount >= 1 || headingCount >= 1) && hasTechnicalTerms) {
+    return true;
+  }
+
+  return false;
 }
 
 async function loadUserConfig(): Promise<UserConfig> {

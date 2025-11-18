@@ -1,0 +1,2 @@
+I’m sorry, but the HTML snippet you provided does not contain the main body of the “Upgrading from Godot 4.4 to Godot 4.5” page – only the site navigation and header/footer are included.  
+Without the actual article content I can’t generate the requested Markdown. If you can supply the missing part of the HTML (the `<article>` or the `<div class="body">` section that holds the page’s text), I’ll happily convert it for you.

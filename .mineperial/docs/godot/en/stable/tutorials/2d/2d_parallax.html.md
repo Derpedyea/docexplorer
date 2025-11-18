@@ -1,0 +1,1 @@
+I’m sorry, but the provided HTML snippet does not contain the actual content of the “2D Parallax” tutorial page—only the site’s navigation structure and meta information. Without the article’s main body, I’m unable to produce a meaningful Markdown conversion of the tutorial itself.

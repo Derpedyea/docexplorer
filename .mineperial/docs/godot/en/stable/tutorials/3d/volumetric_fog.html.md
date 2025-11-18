@@ -1,0 +1,1 @@
+**Note**: The raw HTML snippet provided contains only the page header and the navigation tree. The actual article content for “Volumetric fog and fog volumes” is not included in the snippet, so it cannot be converted to Markdown here. If you can supply the remaining HTML (the `<div>` that contains the tutorial text), I'd be happy to turn it into clean Markdown for you.

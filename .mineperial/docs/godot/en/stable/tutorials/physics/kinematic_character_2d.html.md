@@ -1,0 +1,2 @@
+**Note:** The provided HTML excerpt contains the page’s navigation and metadata but does **not** include the actual tutorial content for “Kinematic character (2D)”.  
+Because the main article body is missing, a faithful Markdown conversion cannot be produced from the supplied snippet alone.

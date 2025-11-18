@@ -7,6 +7,7 @@ export type HtmlToMarkdownOptions = {
   url: string;
   title?: string;
   html: string;
+  forceTreatAsDoc?: boolean;
 };
 
 const MAX_HTML_CHARS = 80000;
@@ -29,13 +30,31 @@ export async function htmlToMarkdown(options: HtmlToMarkdownOptions): Promise<st
     },
   });
 
-  const response = await streamText({
-    model,
-    prompt,
-  });
+  const maxAttempts = 3;
+  let lastError: unknown;
 
-  await response.consumeStream();
-  return response.text;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await streamText({
+        model,
+        prompt,
+      });
+
+      await response.consumeStream();
+      return response.text;
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts - 1) {
+        throw error;
+      }
+      const delayMs = 1000 * Math.pow(2, attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to convert HTML to Markdown after retries.");
 }
 
 export async function inferPathPrefix(options: {
@@ -104,14 +123,43 @@ export async function inferPathPrefix(options: {
 
 function buildPrompt(options: HtmlToMarkdownOptions): string {
   const parts: string[] = [];
-  parts.push("You are a documentation classifier and formatter.");
-  parts.push(
-    "First, decide if this page is actual technical product documentation (such as API reference, configuration, tutorials, how-to guides, or conceptual docs) as opposed to marketing pages, landing pages, blog posts, pricing pages, generic navigation, or legal pages."
-  );
-  parts.push('If it is not documentation, respond with exactly "__SKIP_NON_DOC__" and nothing else.');
-  parts.push(
-    "If it is documentation, convert the page HTML into clean, well-structured Markdown. Preserve headings, lists, code blocks, inline code, and important links, and use descriptive headings and subsections where appropriate."
-  );
+
+  if (options.forceTreatAsDoc) {
+    parts.push("You are a documentation formatter.");
+    parts.push(
+      "This page is known to be technical product documentation (such as API reference, configuration, tutorials, how-to guides, or conceptual docs)."
+    );
+    parts.push(
+      "Do not try to decide whether it is documentation; assume that it is. Do not respond with '__SKIP_NON_DOC__'. Always convert the page HTML into clean, well-structured Markdown."
+    );
+    parts.push(
+      "Preserve as much of the original content as possible. Do not summarise sections, do not omit content, and do not add placeholder text such as '(details omitted)' or '(rest of page)'."
+    );
+    parts.push(
+      "Do not invent explanations or commentary that are not present in the HTML. Do not add meta notes like 'the full content of the page was not provided' or 'meta description'."
+    );
+  } else {
+    parts.push("You are a documentation classifier and formatter.");
+    parts.push(
+      "First, decide if this page is actual technical product documentation (such as API reference, configuration, tutorials, how-to guides, or conceptual docs) as opposed to marketing pages, landing pages, blog posts, pricing pages, generic navigation, or legal pages."
+    );
+    parts.push(
+      "Use '__SKIP_NON_DOC__' only for clearly non-documentation pages. When the page is mixed or ambiguous but contains any substantial technical explanation, examples, configuration details, or reference material, treat it as documentation instead of skipping."
+    );
+    parts.push(
+      'If it is not documentation, respond with exactly "__SKIP_NON_DOC__" and nothing else.'
+    );
+    parts.push(
+      "If it is documentation, convert the page HTML into clean, well-structured Markdown. Preserve headings, lists, code blocks, inline code, and important links, and use descriptive headings and subsections where appropriate."
+    );
+    parts.push(
+      "When converting documentation, preserve as much of the original content as possible. Do not summarise whole sections into one sentence, do not omit content, and do not add placeholder text such as '(details omitted)' or '(rest of page)'."
+    );
+    parts.push(
+      "Do not invent explanations or commentary that are not present in the HTML. Do not add meta notes like 'the full content of the page was not provided' or 'meta description'."
+    );
+  }
+
   parts.push("");
   parts.push(`URL: ${options.url}`);
   if (options.title) {

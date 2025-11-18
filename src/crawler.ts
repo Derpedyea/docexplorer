@@ -22,14 +22,8 @@ export async function crawl(
     }
     visited.add(current);
 
-    let response: Response;
-    try {
-      response = await fetch(current);
-    } catch {
-      continue;
-    }
-
-    if (!response.ok) {
+    const response = await fetchWithRetry(current, 3);
+    if (!response || !response.ok) {
       continue;
     }
 
@@ -47,6 +41,48 @@ export async function crawl(
   }
 
   return pages;
+}
+
+async function fetchWithRetry(url: string, maxAttempts: number): Promise<Response | null> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url);
+
+      if (response.status === 429 || response.status >= 500) {
+        if (attempt === maxAttempts - 1) {
+          return null;
+        }
+
+        const retryAfterHeader = response.headers.get("retry-after");
+        const retryAfterSeconds = retryAfterHeader
+          ? Number.parseInt(retryAfterHeader, 10)
+          : Number.NaN;
+        const delayMs = Number.isFinite(retryAfterSeconds)
+          ? retryAfterSeconds * 1000
+          : 500 * Math.pow(2, attempt);
+
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      if (!response.ok) {
+        return null;
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts - 1) {
+        return null;
+      }
+      const delayMs = 500 * Math.pow(2, attempt);
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return null;
 }
 
 function extractTitle(html: string): string | undefined {
