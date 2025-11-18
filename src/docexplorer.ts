@@ -7,8 +7,8 @@ import { htmlToMarkdown, inferPathPrefix } from "./openrouter";
 
 const DEFAULT_CONCURRENCY = 5;
 const MAX_CONCURRENCY = 16;
-const DEFAULT_MAX_PAGES = 50;
-const MAX_MAX_PAGES = 2000;
+const DEFAULT_MAX_PAGES = 20_000;
+const MAX_MAX_PAGES = 20_000;
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const MAX_PATH_SEGMENT_LENGTH = 64;
 const CACHE_VERSION = 1;
@@ -57,6 +57,11 @@ async function main() {
     return;
   }
 
+  if (commandOrName === "push") {
+    await handlePush(rest);
+    return;
+  }
+
   if (commandOrName === "set-api-key") {
     await handleSetApiKey(rest);
     return;
@@ -81,6 +86,7 @@ function printUsage(): void {
   bun run docexplorer index <name> <url> [pathPrefix] [--force]
   bun run docexplorer list
   bun run docexplorer pull <docId-or-name>
+  bun run docexplorer push
   bun run docexplorer set-api-key <apiKey>
 
 Environment variables:
@@ -139,12 +145,28 @@ async function handleIndex(args: string[]): Promise<void> {
   const cacheDir = path.join(cacheRoot, docId);
   const cachedDocsDir = path.join(cacheDir, "docs");
   const localDocsDir = path.join(cwd, LOCAL_DOCS_ROOT, docName);
+  const backendBaseUrl = getBackendBaseUrlFromEnv();
 
   if (!force && (await pathExists(cachedDocsDir))) {
     console.log(`Cache hit for ${docName} (${docId}). Copying docs into ${localDocsDir}...`);
     await copyDir(cachedDocsDir, localDocsDir);
     console.log("Done (served from cache).");
     return;
+  }
+
+  if (!force && backendBaseUrl) {
+    const servedFromShared = await maybeServeFromRemoteCache({
+      backendBaseUrl,
+      docId,
+      docName,
+      baseUrl,
+      cwd,
+      localDocsDir,
+      cacheDir,
+    });
+    if (servedFromShared) {
+      return;
+    }
   }
 
   let pathPrefix = pathArg && pathArg.trim() ? pathArg.trim() : undefined;
@@ -178,6 +200,11 @@ async function handleIndex(args: string[]): Promise<void> {
   }
 
   const concurrency = getConcurrencyFromEnv();
+  const pagesForBackend: {
+    url: string;
+    title?: string;
+    contentMarkdown: string;
+  }[] = [];
   let docsWritten = 0;
 
   await processPagesConcurrently(
@@ -234,6 +261,11 @@ async function handleIndex(args: string[]): Promise<void> {
         const filePath = buildFilePath(cwd, docName, baseUrl, pageUrlObj);
         await writeFileEnsuringDir(filePath, markdown);
         docsWritten += 1;
+        pagesForBackend.push({
+          url: page.url,
+          title: page.title ?? undefined,
+          contentMarkdown: markdown,
+        });
       } catch (error) {
         console.error(`Failed to process ${page.url}:`, error);
       }
@@ -266,6 +298,10 @@ async function handleIndex(args: string[]): Promise<void> {
 
   await saveDocsetToCache(localDocsDir, cacheDir, metadata);
   console.log(`Cached docset as ${docId}. Done.`);
+
+  if (backendBaseUrl) {
+    await uploadDocsetToBackend(backendBaseUrl, metadata, pagesForBackend);
+  }
 }
 
 async function handleList(): Promise<void> {
@@ -326,6 +362,71 @@ async function handlePull(args: string[]): Promise<void> {
   console.log(`Copied cached docset '${entry.docName}' (id ${entry.docId}) into ${destDir}.`);
 }
 
+async function handlePush(args: string[]): Promise<void> {
+  if (args.length > 0) {
+    console.error("Usage: bun run docexplorer push");
+    process.exit(1);
+  }
+
+  const backendBaseUrl = getBackendBaseUrlFromEnv();
+  if (!backendBaseUrl) {
+    console.error(
+      "Cannot push docsets because no backend URL is configured and no default backend is available.",
+    );
+    process.exit(1);
+  }
+
+  const entries = await readAllCacheEntries();
+  if (entries.length === 0) {
+    console.log("No cached docsets found. Run `bun run docexplorer index ...` first.");
+    return;
+  }
+
+  const cacheRoot = await ensureCacheRoot();
+
+  for (const entry of entries) {
+    const cacheDir = path.join(cacheRoot, entry.docId);
+    const docsDir = path.join(cacheDir, "docs");
+
+    if (!(await pathExists(docsDir))) {
+      console.warn(
+        `Skipping docset ${entry.docName} (${entry.docId}) because its cached docs directory is missing.`,
+      );
+      continue;
+    }
+
+    console.log(
+      `Building payload for docset '${entry.docName}' (id ${entry.docId}) from cached Markdown files...`,
+    );
+
+    const pages = await readPagesFromDocsDir(docsDir, entry.sourceUrl);
+
+    if (pages.length === 0) {
+      console.warn(
+        `Skipping docset ${entry.docName} (${entry.docId}) because no Markdown files were found in the cache.`,
+      );
+      continue;
+    }
+
+    const metadata: CacheMetadata = {
+      version: CACHE_VERSION,
+      docId: entry.docId,
+      docName: entry.docName,
+      sourceUrl: entry.sourceUrl,
+      pathPrefix: entry.pathPrefix,
+      model: entry.model,
+      createdAt: entry.createdAt,
+      pagesIndexed: entry.pagesIndexed,
+      docsStored: entry.docsStored,
+    };
+
+    console.log(
+      `Pushing ${pages.length} pages for docset '${entry.docName}' (id ${entry.docId}) to backend...`,
+    );
+    await uploadDocsetToBackend(backendBaseUrl, metadata, pages);
+  }
+}
+
 async function handleSetApiKey(args: string[]): Promise<void> {
   const key = args[0];
   if (!key) {
@@ -343,6 +444,91 @@ async function handleSetApiKey(args: string[]): Promise<void> {
   config.openrouterApiKey = trimmed;
   await saveUserConfig(config);
   console.log("Saved OpenRouter API key to local config.");
+}
+
+async function readPagesFromDocsDir(
+  docsDir: string,
+  sourceUrl: string,
+): Promise<BackendPage[]> {
+  const pages: BackendPage[] = [];
+
+  async function walk(currentDir: string): Promise<void> {
+    const dirEntries = await fs.readdir(currentDir, { withFileTypes: true });
+    for (const entry of dirEntries) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+        const relativePath = path.relative(docsDir, fullPath);
+        let contents: string;
+        try {
+          contents = await fs.readFile(fullPath, "utf8");
+        } catch {
+          continue;
+        }
+
+        if (!contents) {
+          continue;
+        }
+
+        const url = buildPageUrlFromRelativePath(relativePath, sourceUrl);
+        const title = inferTitleFromMarkdown(contents);
+
+        pages.push({
+          url,
+          title: title ?? undefined,
+          contentMarkdown: contents,
+        });
+      }
+    }
+  }
+
+  await walk(docsDir);
+  return pages;
+}
+
+function buildPageUrlFromRelativePath(relativePath: string, sourceUrl: string): string {
+  const normalized = relativePath.split(path.sep).join("/");
+
+  if (!normalized || normalized === "index.md") {
+    return sourceUrl;
+  }
+
+  const segments = normalized.split("/");
+  const last = segments[segments.length - 1];
+
+  let relativeForUrl: string;
+
+  if (last.toLowerCase() === "index.md") {
+    const dir = segments.slice(0, -1).join("/");
+    relativeForUrl = dir ? `${dir}/` : "";
+  } else {
+    const withoutExt = last.replace(/\.md$/i, "");
+    const dir = segments.slice(0, -1).join("/");
+    relativeForUrl = dir ? `${dir}/${withoutExt}` : withoutExt;
+  }
+
+  try {
+    const url = new URL(relativeForUrl || "./", sourceUrl);
+    return url.toString();
+  } catch {
+    return sourceUrl;
+  }
+}
+
+function inferTitleFromMarkdown(markdown: string): string | undefined {
+  const lines = markdown.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const match = /^#\s+(.+)$/.exec(trimmed);
+    if (match && match[1].trim()) {
+      return match[1].trim();
+    }
+  }
+  return undefined;
 }
 
 function sanitizeName(name: string): string {
@@ -696,6 +882,321 @@ function computeDocId(docName: string, url: string, pathPrefix?: string): string
     .update(pathPrefix ?? "")
     .digest("hex");
   return hash.slice(0, 16);
+}
+
+type BackendPage = {
+  url: string;
+  title?: string;
+  contentMarkdown: string;
+};
+
+type MaybeServeFromRemoteCacheOptions = {
+  backendBaseUrl: string;
+  docId: string;
+  docName: string;
+  baseUrl: URL;
+  cwd: string;
+  localDocsDir: string;
+  cacheDir: string;
+};
+
+function getBackendBaseUrlFromEnv(): string | undefined {
+  const raw = process.env.DOCEXPLORER_BACKEND_URL;
+  const defaultUrl = "https://docexplorer.derped.dev";
+
+  const trimmed = raw?.trim();
+
+  if (trimmed) {
+    try {
+      const envUrl = new URL(trimmed);
+      if (!ALLOWED_PROTOCOLS.has(envUrl.protocol)) {
+        console.warn(
+          `Ignoring DOCEXPLORER_BACKEND_URL with unsupported protocol: ${trimmed}`,
+        );
+      } else {
+        return envUrl.toString().replace(/\/$/, "");
+      }
+    } catch {
+      console.warn(`Ignoring invalid DOCEXPLORER_BACKEND_URL value: ${trimmed}`);
+    }
+  }
+
+  try {
+    const fallback = new URL(defaultUrl);
+    if (!ALLOWED_PROTOCOLS.has(fallback.protocol)) {
+      return undefined;
+    }
+    return fallback.toString().replace(/\/$/, "");
+  } catch {
+    return undefined;
+  }
+}
+
+async function maybeServeFromRemoteCache(
+  options: MaybeServeFromRemoteCacheOptions,
+): Promise<boolean> {
+  const base = options.backendBaseUrl.replace(/\/$/, "");
+  const docsetUrl = `${base}/api/docsets/${encodeURIComponent(options.docId)}`;
+
+  let docsetResponse;
+  try {
+    docsetResponse = await fetch(docsetUrl);
+  } catch (error) {
+    console.warn("Failed to contact shared cache backend:", error);
+    return false;
+  }
+
+  if (docsetResponse.status === 404) {
+    return false;
+  }
+
+  if (!docsetResponse.ok) {
+    console.warn(
+      `Shared cache backend returned ${docsetResponse.status} for docset lookup`,
+    );
+    return false;
+  }
+
+  let docsetJson: unknown;
+  try {
+    docsetJson = await docsetResponse.json();
+  } catch (error) {
+    console.warn("Failed to parse shared cache docset response:", error);
+    return false;
+  }
+
+  const docset = (docsetJson as { docset?: unknown }).docset as
+    | {
+        id?: string;
+        docId?: string;
+        docName?: string;
+        sourceUrl?: string;
+        pathPrefix?: string | null;
+        model?: string;
+        createdAt?: string;
+        pagesIndexed?: number;
+        docsStored?: number;
+      }
+    | undefined;
+
+  if (!docset) {
+    console.warn("Shared cache response for docset did not include docset data.");
+    return false;
+  }
+
+  const sourceUrl =
+    typeof docset.sourceUrl === "string" && docset.sourceUrl.trim()
+      ? docset.sourceUrl
+      : options.baseUrl.href;
+
+  let remoteBaseUrl: URL;
+  try {
+    remoteBaseUrl = new URL(sourceUrl);
+  } catch {
+    remoteBaseUrl = options.baseUrl;
+  }
+
+  const pagesUrl = `${base}/api/docsets/${encodeURIComponent(
+    options.docId,
+  )}/pages`;
+
+  let pagesResponse;
+  try {
+    pagesResponse = await fetch(pagesUrl);
+  } catch (error) {
+    console.warn("Failed to read pages from shared cache backend:", error);
+    return false;
+  }
+
+  if (!pagesResponse.ok) {
+    console.warn(
+      `Shared cache backend returned ${pagesResponse.status} when listing pages`,
+    );
+    return false;
+  }
+
+  let pagesJson: unknown;
+  try {
+    pagesJson = await pagesResponse.json();
+  } catch (error) {
+    console.warn("Failed to parse shared cache pages response:", error);
+    return false;
+  }
+
+  const pages = (pagesJson as { pages?: unknown }).pages as
+    | { id?: number; pageUrl?: string; title?: string | null }[]
+    | undefined;
+
+  if (!pages || pages.length === 0) {
+    console.warn("Shared cache docset exists but has no pages.");
+    return false;
+  }
+
+  try {
+    await fs.rm(options.localDocsDir, { recursive: true, force: true });
+  } catch {
+    // best-effort cleanup
+  }
+
+  let docsWritten = 0;
+
+  for (const summary of pages) {
+    const pageId = summary?.id;
+    const pageUrl = summary?.pageUrl;
+
+    if (!pageId || !pageUrl) {
+      continue;
+    }
+
+    const pageDetailUrl = `${base}/api/docsets/${encodeURIComponent(
+      options.docId,
+    )}/pages/${encodeURIComponent(String(pageId))}`;
+
+    let pageDetailResponse;
+    try {
+      pageDetailResponse = await fetch(pageDetailUrl);
+    } catch (error) {
+      console.warn("Failed to read page from shared cache backend:", error);
+      continue;
+    }
+
+    if (!pageDetailResponse.ok) {
+      continue;
+    }
+
+    let pageDetailJson: unknown;
+    try {
+      pageDetailJson = await pageDetailResponse.json();
+    } catch {
+      continue;
+    }
+
+    const page = (pageDetailJson as { page?: unknown }).page as
+      | {
+          pageUrl?: string;
+          title?: string | null;
+          contentMarkdown?: string;
+        }
+      | undefined;
+
+    if (!page || typeof page.contentMarkdown !== "string") {
+      continue;
+    }
+
+    let pageUrlObj: URL;
+    try {
+      pageUrlObj = new URL(pageUrl);
+    } catch {
+      try {
+        pageUrlObj = new URL(pageUrl, sourceUrl);
+      } catch {
+        continue;
+      }
+    }
+
+    const filePath = buildFilePath(
+      options.cwd,
+      options.docName,
+      remoteBaseUrl,
+      pageUrlObj,
+    );
+    await writeFileEnsuringDir(filePath, page.contentMarkdown);
+    docsWritten += 1;
+  }
+
+  if (docsWritten === 0) {
+    console.warn("Shared cache docset had no usable pages.");
+    return false;
+  }
+
+  const metadata: CacheMetadata = {
+    version: CACHE_VERSION,
+    docId: options.docId,
+    docName: options.docName,
+    sourceUrl,
+    pathPrefix:
+      typeof docset.pathPrefix === "string" && docset.pathPrefix.trim()
+        ? docset.pathPrefix
+        : undefined,
+    model:
+      typeof docset.model === "string" && docset.model.trim()
+        ? docset.model
+        : "unknown",
+    createdAt:
+      typeof docset.createdAt === "string" && docset.createdAt.trim()
+        ? docset.createdAt
+        : new Date().toISOString(),
+    pagesIndexed:
+      typeof docset.pagesIndexed === "number" && Number.isFinite(docset.pagesIndexed)
+        ? docset.pagesIndexed
+        : docsWritten,
+    docsStored:
+      typeof docset.docsStored === "number" && Number.isFinite(docset.docsStored)
+        ? docset.docsStored
+        : docsWritten,
+  };
+
+  await saveDocsetToCache(options.localDocsDir, options.cacheDir, metadata);
+
+  console.log(
+    `Served ${docsWritten} docs for ${options.docName} from shared cache (${options.docId}).`,
+  );
+
+  return true;
+}
+
+async function uploadDocsetToBackend(
+  backendBaseUrl: string,
+  metadata: CacheMetadata,
+  pages: BackendPage[],
+): Promise<void> {
+  if (!pages.length) {
+    return;
+  }
+
+  const base = backendBaseUrl.replace(/\/$/, "");
+  const url = `${base}/api/docsets`;
+
+  const payload = {
+    docId: metadata.docId,
+    docName: metadata.docName,
+    sourceUrl: metadata.sourceUrl,
+    pathPrefix: metadata.pathPrefix,
+    model: metadata.model,
+    createdAt: metadata.createdAt,
+    pagesIndexed: metadata.pagesIndexed,
+    docsStored: metadata.docsStored,
+    pages,
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `Failed to upload docset to shared cache backend (status ${response.status}).`,
+      );
+      try {
+        const text = await response.text();
+        if (text) {
+          console.warn(text);
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    console.log("Uploaded docset to shared cache backend.");
+  } catch (error) {
+    console.warn("Failed to upload docset to shared cache backend:", error);
+  }
 }
 
 async function pathExists(target: string): Promise<boolean> {
