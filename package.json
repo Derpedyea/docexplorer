@@ -1,14 +1,38 @@
 {
-  "name": "docexplorer",
+  "name": "@derped/docexplorer",
   "version": "0.1.0",
-  "private": true,
+  "description": "CLI tool for crawling external documentation sites, converting pages to Markdown via OpenRouter, and materializing the docs into each of your local projects",
   "type": "module",
-  "scripts": {
-    "docexplorer": "bun src/docexplorer.ts",
-    "build": "tsc -p tsconfig.json"
-  },
+  "main": "dist/docexplorer.js",
   "bin": {
     "docexplorer": "dist/docexplorer.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "docexplorer": "bun src/docexplorer.ts",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "documentation",
+    "crawler",
+    "cli",
+    "markdown",
+    "openrouter",
+    "docs",
+    "scraper"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "@inquirer/prompts": "^8.0.1",
