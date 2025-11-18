@@ -1,6 +1,6 @@
 # docexplorer
 
-CLI tool for crawling external documentation sites, converting pages to Markdown via OpenRouter, and materializing the docs into each of your local projects while sharing a system-wide cache.
+CLI tool for crawling external documentation sites, converting pages to Markdown via OpenRouter, and materializing the docs into each of your local projects. It supports a system-wide local cache and can sync with a remote backend to share docsets across your team.
 
 ## Installation
 
@@ -39,84 +39,56 @@ If you do not want to link globally, you can always run via Bun directly from th
 bun run docexplorer -- <command> [...args]
 ```
 
-Example:
+## Quick Start (Interactive Mode)
+
+Simply run the tool without arguments to enter the interactive menu:
 
 ```bash
-bun run docexplorer -- index my-doc https://example.com/docs
+bun run docexplorer
 ```
 
-> Note: the `--` separates Bun arguments from docexplorer arguments.
+This will guide you through indexing, listing, pulling, pushing, and configuring the tool.
 
 ## Configuration
 
-### OpenRouter API key
+### OpenRouter API Key
 
 `docexplorer` needs an OpenRouter API key to call the model that converts HTML into Markdown and infers docs path prefixes.
 
-You can configure the key in two ways:
-
 1. **Environment variable (takes precedence)**
-
-   - Set `OPENROUTER_API_KEY` in your shell or OS-level environment.
+   - Set `OPENROUTER_API_KEY` in your shell.
 
 2. **Stored user config (persistent)**
+   - Run `docexplorer config` (or `set-api-key`) to save it to `~/.mineperial/docsexplorer/config.json`.
 
-   - Run:
+### Backend URL (Optional)
 
-     ```bash
-     docexplorer set-api-key <your-openrouter-api-key>
-     ```
+To share docsets with a team or across machines, you can configure a backend URL (pointing to a running `docgrabber-backend` instance).
 
-   - Or, from this repo without global install:
+- **Environment variable**: `DOCEXPLORER_BACKEND_URL`
+- **Default**: `https://docexplorer.derped.dev`
 
-     ```bash
-     bun run docexplorer -- set-api-key <your-openrouter-api-key>
-     ```
-
-   - This writes a small JSON config file at:
-
-     - POSIX: `~/.mineperial/docsexplorer/config.json`
-     - Windows: `C:\Users\<you>\.mineperial\docsexplorer\config.json`
-
-Resolution order:
-
-1. `OPENROUTER_API_KEY` environment variable (if set and non-empty)
-2. `openrouterApiKey` in `config.json`
-3. If neither is set, `index` will exit with an error and ask you to configure a key.
-
-### Other environment variables
+### Other Environment Variables
 
 - `OPENROUTER_MODEL`
   - Default: `openai/gpt-oss-safeguard-20b`
-  - Controls which model is used for HTML→Markdown conversion and docs-path inference.
+  - Controls the model used for HTML→Markdown conversion.
 - `DOCEXPLORER_CONCURRENCY`
   - Default: `5`, maximum `16`
-  - Controls how many pages are processed in parallel when crawling.
+  - Controls parallel processing of pages.
+- `DOCEXPLORER_MAX_PAGES`
+  - Default: `20000`
+  - Limit on the number of pages to crawl per site.
 
-## Cache and docs layout
+## Cache and Docs Layout
 
-### Global cache location
-
-All cached docsets are stored under a per-user cache directory:
-
+### Global Cache
+Cached docsets are stored in:
 - POSIX: `~/.mineperial/docsexplorer/cache`
 - Windows: `C:\Users\<you>\.mineperial\docsexplorer\cache`
 
-Each indexed docset is stored in a subdirectory named by a stable document ID:
-
-```text
-~/.mineperial/docsexplorer/cache/
-  <docId>/
-    docs/            # Cached Markdown files
-    metadata.json    # CacheMetadata describing the docset
-```
-
-The `docId` is derived from the doc name, base URL, and optional path prefix.
-
-### Per-project docs directory
-
-When you run `docexplorer` from a project root, it writes documentation into a hidden folder inside that repo:
-
+### Project Docs
+When running `index` or `pull`, docs are written to:
 ```text
 <your-project>/
   .mineperial/
@@ -125,90 +97,63 @@ When you run `docexplorer` from a project root, it writes documentation into a h
         ... Markdown tree ...
 ```
 
-- `docName` is a sanitized version of the name you pass to `index`.
-- The directory structure mirrors the source site structure (paths become nested folders with `index.md` or `<page>.md`).
-
-Because the cache is global and shared, you can:
-
-- Index a site once from project A.
-- Reuse the cached docset in project B by running `index` or `pull` with the same name/ID.
-
-## CLI commands
+## CLI Commands
 
 ### `index`
+Crawl a site and create a local docset.
 
 ```bash
 docexplorer index <name> <url> [pathPrefix] [--force]
 ```
-
-- **`name`**: A human-friendly name (e.g. `openrouter`, `nextjs`, `my-service`). It is sanitized into `docName`.
-- **`url`**: Base URL of the documentation site (e.g. `https://example.com/docs`).
-- **`pathPrefix`** (optional): Restrict crawling to paths under this prefix (e.g. `/docs`, `/guide`).
-- **`--force`** (optional): Ignore any existing cache entry and re-crawl/re-convert the docs.
-
-Behavior:
-
-1. Resolves your OpenRouter API key (env var or stored config).
-2. Computes a `docId` from `docName`, `url`, and `pathPrefix`.
-3. Checks the global cache at `~/.mineperial/docsexplorer/cache/<docId>/docs`.
-   - If present and `--force` is not provided, it copies the cached docs into the current project’s `.mineperial/docs/<docName>` folder.
-   - If absent or `--force` is set, it crawls the site, converts pages to Markdown, writes them into `.mineperial/docs/<docName>`, then saves them into the global cache.
-4. Attempts to infer a docs `pathPrefix` automatically using the model if you do not supply one.
+- `name`: Friendly name (e.g. `nextjs`).
+- `url`: Base URL (e.g. `https://nextjs.org/docs`).
+- `pathPrefix`: Optional path to restrict crawling (e.g. `/docs`).
+- `--force`: Re-crawl even if cached.
 
 ### `list`
+List all docsets in your local global cache.
 
 ```bash
 docexplorer list
 ```
 
-Prints all cached docsets from the global cache, including:
+### `list-remote`
+List docsets available on the configured backend.
 
-- `docId`
-- `name` (sanitized `docName`)
-- Source URL
-- Path prefix (if any)
-- Cached timestamp
-- Number of stored docs
+```bash
+docexplorer list-remote [query] [--limit <n>] [--offset <n>]
+```
 
 ### `pull`
+Install a docset into your current project. Checks local cache first, then tries to download from the backend.
 
 ```bash
 docexplorer pull <docId-or-name>
 ```
 
-Copies an already-cached docset from the global cache into the current project’s `.mineperial/docs` directory.
+### `push`
+Upload all locally cached docsets to the configured backend.
 
-- `docId-or-name` can be either:
-  - The exact `docId`, or
-  - A `docName` that uniquely matches one cached entry.
+```bash
+docexplorer push
+```
 
-If multiple entries share the same `docName`, you’ll be asked to disambiguate by ID.
+### `config`
+Open the interactive configuration menu to set API keys, defaults, and limits.
+
+```bash
+docexplorer config
+```
 
 ### `set-api-key`
+Quickly set the OpenRouter API key in the persistent config.
 
 ```bash
 docexplorer set-api-key <apiKey>
 ```
 
-Stores your OpenRouter API key into the user config file at `~/.mineperial/docsexplorer/config.json`.
-
-- The stored key is used whenever `OPENROUTER_API_KEY` is not set in the environment.
-- If you later set `OPENROUTER_API_KEY`, that value overrides the stored config for that process.
-
-Example:
-
-```bash
-docexplorer set-api-key sk-or-...
-```
-
 ## Development
 
-- Source code lives in `src/`.
-- The main entry point is `src/docexplorer.ts`.
-- Build with:
-
-  ```bash
-  bun run build
-  ```
-
-After changes to the CLI logic, rebuild before using the globally linked binary.
+- Source code: `src/`
+- Entry point: `src/docexplorer.ts`
+- Build: `bun run build`
